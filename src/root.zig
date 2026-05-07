@@ -33,6 +33,20 @@ pub fn decode(dst: []u8, src: []const u8) ![]u8 {
     return _decode(dst, src);
 }
 
+pub fn encodeAlloc(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    const buf = try allocator.alloc(u8, encodedLen(src.len));
+    errdefer allocator.free(buf);
+    const result = try _encode(buf, src);
+    return allocator.realloc(buf, result.len);
+}
+
+pub fn decodeAlloc(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    const buf = try allocator.alloc(u8, decodedLen(src.len));
+    errdefer allocator.free(buf);
+    const result = try _decode(buf, src);
+    return allocator.realloc(buf, result.len);
+}
+
 /// Encodes src into dst using Base58.
 /// dst must be at least encodedLen(src.len) bytes.
 /// Returns a slice of dst containing the encoded result.
