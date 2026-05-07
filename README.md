@@ -23,27 +23,35 @@ exe.root_module.addImport("base58", base58_dep.module("base58"));
 
 ## Usage
 
+The caller provides the destination buffer. No allocator required.
+
 ```zig
 const base58 = @import("base58");
 
 // Encode
-const encoded = try base58.encode(allocator, &bytes);
-defer allocator.free(encoded);
+var enc_buf: [base58.encodedLen(src.len)]u8 = undefined;
+const encoded = try base58.encode(&enc_buf, &src);
 
 // Decode
-const decoded = try base58.decode(allocator, encoded);
-defer allocator.free(decoded);
+var dec_buf: [encoded.len]u8 = undefined;
+const decoded = try base58.decode(&dec_buf, encoded);
 ```
 
-Both functions allocate the result — the caller is responsible for freeing it.
+Both functions write into the caller-supplied buffer and return a slice of it.
 
 ## API
 
 ```zig
-pub fn encode(allocator: Allocator, src: []const u8) ![]u8
-pub fn decode(allocator: Allocator, src: []const u8) ![]u8
+pub fn encode(dst: []u8, src: []const u8) ![]u8
+pub fn decode(dst: []u8, src: []const u8) ![]u8
 
-pub const Base58Error = error{ Decode, InvalidCharacter };
+/// Minimum dst size for encode.
+pub fn encodedLen(src_len: usize) usize
+
+/// Minimum dst size for decode.
+pub fn decodedLen(src_len: usize) usize
+
+pub const Base58Error = error{ Decode, InvalidCharacter, NoSpaceLeft };
 ```
 
 ## Running tests
