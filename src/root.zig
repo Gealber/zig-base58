@@ -47,6 +47,29 @@ fn makeEncTable(comptime N: usize) [N / 4][intermediateSize(N) - 1]u32 {
 const enc_table_32: [8][8]u32 = makeEncTable(32);
 const enc_table_64: [16][17]u32 = makeEncTable(64);
 
+fn makeDecTable(comptime N: usize) [intermediateSize(N)][N / 4]u32 {
+    @setEvalBranchQuota(10000);
+    const inter_sz = intermediateSize(N);
+    const binary_sz = N / 4;
+    const base: comptime_int = 1 << 32;
+    var table: [inter_sz][binary_sz]u32 = .{.{0} ** binary_sz} ** inter_sz;
+    for (0..inter_sz) |j| {
+        var value: comptime_int = 1;
+        var p: usize = 0;
+        while (p < 5 * (inter_sz - 1 - j)) : (p += 1) value *= 58;
+        var k: usize = binary_sz;
+        while (k > 0) {
+            k -= 1;
+            table[j][k] = @intCast(value % base);
+            value /= base;
+        }
+    }
+    return table;
+}
+
+const dec_table_32: [9][8]u32 = makeDecTable(32);
+const dec_table_64: [18][16]u32 = makeDecTable(64);
+
 pub const Base58Error = error{ Decode, InvalidCharacter, NoSpaceLeft };
 
 /// Returns the maximum buffer size needed for encode(dst, src) given src.len.
@@ -68,7 +91,11 @@ pub fn encode(dst: []u8, src: []const u8) ![]u8 {
 }
 
 pub fn decode(dst: []u8, src: []const u8) ![]u8 {
-    return _decode(dst, src);
+    return switch (src.len) {
+        32 => decode32(dst, src[0..32]),
+        64 => decode64(dst, src[0..64]),
+        else => _decode(dst, src),
+    };
 }
 
 pub fn encodeAlloc(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
@@ -312,6 +339,140 @@ fn encode64(dst: []u8, src: [64]u8) ![]u8 {
     return rawToBase58(64, in_leading_zero, raw, dst);
 }
 
+fn countLeadingOnes(src: []const u8) usize {
+    var count: usize = 0;
+    while (count < src.len and src[count] == '1') : (count += 1) {}
+    return count;
+}
+
+// Parse a base58 string into a raw digit array (values 0-57), right-aligned.
+// Mirrors rawToBase58.
+inline fn base58ToRaw(comptime N: usize, in_leading_ones: usize, src: []const u8) ![intermediateSize(N) * 5]u8 {
+    const raw_sz = comptime intermediateSize(N) * 5;
+    const max_encoded = comptime if (N == 32) 44 else 88;
+
+    if (src.len > max_encoded) return Base58Error.Decode;
+
+    var raw: [raw_sz]u8 = .{0} ** raw_sz;
+
+    const payload = src[in_leading_ones..];
+    const offset = raw_sz - payload.len;
+    for (payload, 0..) |c, i| {
+        const v = InverseAlphabet[c];
+        if (v == 255) return Base58Error.InvalidCharacter;
+        raw[offset + i] = v;
+    }
+
+    return raw;
+}
+
+// Group each consecutive 5 raw digits into one base-58^5 intermediate value.
+// Mirrors intermediateToRaw. Vectorized across all inter_sz groups simultaneously.
+inline fn rawToIntermediate(comptime N: usize, raw: [intermediateSize(N) * 5]u8) [intermediateSize(N)]u64 {
+    const inter_sz = comptime intermediateSize(N);
+    const VecType = @Vector(inter_sz, u64);
+
+    var d4: VecType = undefined;
+    var d3: VecType = undefined;
+    var d2: VecType = undefined;
+    var d1: VecType = undefined;
+    var d0: VecType = undefined;
+    inline for (0..inter_sz) |i| {
+        d4[i] = raw[5 * i + 0];
+        d3[i] = raw[5 * i + 1];
+        d2[i] = raw[5 * i + 2];
+        d1[i] = raw[5 * i + 3];
+        d0[i] = raw[5 * i + 4];
+    }
+
+    const result = d4 * @as(VecType, @splat(11316496)) +
+        d3 * @as(VecType, @splat(195112)) +
+        d2 * @as(VecType, @splat(3364)) +
+        d1 * @as(VecType, @splat(58)) +
+        d0;
+
+    return @bitCast(result);
+}
+
+// Matrix multiply intermediate base-58^5 values into 32-bit binary limbs.
+// Mirrors limbsToIntermediate32. Uses u128 accumulators because inter_sz
+// products of (< 2^30) * (< 2^32) sum to > 2^64.
+fn intermediateToLimbs32(intermediate: [9]u64) ![8]u32 {
+    var binary: [8]u128 = .{0} ** 8;
+    for (0..9) |j| {
+        for (0..8) |k| {
+            binary[k] += @as(u128, intermediate[j]) * @as(u128, dec_table_32[j][k]);
+        }
+    }
+
+    var k: usize = 7;
+    while (k > 0) : (k -= 1) {
+        binary[k - 1] += binary[k] >> 32;
+        binary[k] &= 0xFFFFFFFF;
+    }
+
+    if (binary[0] >> 32 != 0) return Base58Error.Decode;
+
+    var limbs: [8]u32 = undefined;
+    for (0..8) |i| limbs[i] = @intCast(binary[i] & 0xFFFFFFFF);
+
+    return limbs;
+}
+
+// Mirrors intermediateToLimbs32 for the 64-byte (signature) case.
+fn intermediateToLimbs64(intermediate: [18]u64) ![16]u32 {
+    var binary: [16]u128 = .{0} ** 16;
+    for (0..18) |j| {
+        for (0..16) |k| {
+            binary[k] += @as(u128, intermediate[j]) * @as(u128, dec_table_64[j][k]);
+        }
+    }
+
+    var k: usize = 15;
+    while (k > 0) : (k -= 1) {
+        binary[k - 1] += binary[k] >> 32;
+        binary[k] &= 0xFFFFFFFF;
+    }
+
+    if (binary[0] >> 32 != 0) return Base58Error.Decode;
+
+    var limbs: [16]u32 = undefined;
+    for (0..16) |i| limbs[i] = @intCast(binary[i] & 0xFFFFFFFF);
+
+    return limbs;
+}
+
+fn decode32(dst: []u8, src: []const u8) ![]u8 {
+    if (dst.len < 32) return Base58Error.NoSpaceLeft;
+
+    const in_leading_ones = countLeadingOnes(src);
+    const raw = try base58ToRaw(32, in_leading_ones, src);
+    const intermediate = rawToIntermediate(32, raw);
+
+    const limbs = try intermediateToLimbs32(intermediate);
+    const bytes: [32]u8 = @bitCast(@byteSwap(@as(@Vector(8, u32), @bitCast(limbs))));
+
+    if (countLeadingZeros(32, bytes) != in_leading_ones) return Base58Error.Decode;
+
+    dst[0..32].* = bytes;
+    return dst[0..32];
+}
+
+fn decode64(dst: []u8, src: []const u8) ![]u8 {
+    if (dst.len < 64) return Base58Error.NoSpaceLeft;
+
+    const in_leading_ones = countLeadingOnes(src);
+    const raw = try base58ToRaw(64, in_leading_ones, src);
+    const intermediate = rawToIntermediate(64, raw);
+    const limbs = try intermediateToLimbs64(intermediate);
+    const bytes: [64]u8 = @bitCast(@byteSwap(@as(@Vector(16, u32), @bitCast(limbs))));
+
+    if (countLeadingZeros(64, bytes) != in_leading_ones) return Base58Error.Decode;
+
+    dst[0..64].* = bytes;
+    return dst[0..64];
+}
+
 test "countLeadingZeros 32" {
     try testing.expectEqual(@as(usize, 32), countLeadingZeros(32, [_]u8{0} ** 32));
     try testing.expectEqual(@as(usize, 0), countLeadingZeros(32, [_]u8{1} ++ [_]u8{0} ** 31));
@@ -447,4 +608,106 @@ test "intermediateToRaw 32, first = 58^5 - 1" {
 test "intermediateToRaw 64, all zeros" {
     const raw = intermediateToRaw(64, .{0} ** 18);
     try testing.expectEqualSlices(u8, &(.{0} ** 90), &raw);
+}
+
+test "rawToIntermediate 32, all zeros" {
+    const intermediate = rawToIntermediate(32, .{0} ** 45);
+    try testing.expectEqualSlices(u64, &(.{0} ** 9), &intermediate);
+}
+
+test "rawToIntermediate 32, last group = [0,0,0,0,1]" {
+    var raw: [45]u8 = .{0} ** 45;
+    raw[44] = 1;
+    const intermediate = rawToIntermediate(32, raw);
+    var expected: [9]u64 = .{0} ** 9;
+    expected[8] = 1;
+    try testing.expectEqualSlices(u64, &expected, &intermediate);
+}
+
+test "rawToIntermediate 32, last group = [1,0,0,0,0]" {
+    var raw: [45]u8 = .{0} ** 45;
+    raw[40] = 1; // first digit of last group → 1 * 58^4 = 11316496
+    const intermediate = rawToIntermediate(32, raw);
+    var expected: [9]u64 = .{0} ** 9;
+    expected[8] = 11316496;
+    try testing.expectEqualSlices(u64, &expected, &intermediate);
+}
+
+test "rawToIntermediate/intermediateToRaw round-trip 32" {
+    // encode a known intermediate, convert to raw, convert back
+    var original: [9]u64 = .{0} ** 9;
+    original[3] = 123456;
+    original[7] = 58 * 3 + 17; // 191
+    const raw = intermediateToRaw(32, original);
+    const recovered = rawToIntermediate(32, raw);
+    try testing.expectEqualSlices(u64, &original, &recovered);
+}
+
+test "decode32, null pubkey" {
+    var out: [32]u8 = undefined;
+    const result = try decode32(&out, "11111111111111111111111111111111");
+    try testing.expectEqualSlices(u8, &(.{0} ** 32), result);
+}
+
+test "decode64, null signature" {
+    var out: [64]u8 = undefined;
+    const result = try decode64(&out, "1" ** 64);
+    try testing.expectEqualSlices(u8, &(.{0} ** 64), result);
+}
+
+test "decode32 round-trip" {
+    const pk = [32]u8{
+        1,  2,  3,  4,  5,  6,  7,  8,
+        9,  10, 11, 12, 13, 14, 15, 16,
+        17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31, 32,
+    };
+    var enc_buf: [encodedMaxLen(32)]u8 = undefined;
+    var dec_buf: [32]u8 = undefined;
+    const encoded = try encode32(&enc_buf, pk);
+    const decoded = try decode32(&dec_buf, encoded);
+    try testing.expectEqualSlices(u8, &pk, decoded);
+}
+
+test "decode64 round-trip" {
+    const sig = [64]u8{
+        1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
+        17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+        33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+        49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
+    };
+    var enc_buf: [encodedMaxLen(64)]u8 = undefined;
+    var dec_buf: [64]u8 = undefined;
+    const encoded = try encode64(&enc_buf, sig);
+    const decoded = try decode64(&dec_buf, encoded);
+    try testing.expectEqualSlices(u8, &sig, decoded);
+}
+
+test "decode32 round-trip, leading zero bytes" {
+    const pk = [8]u8{ 0, 0, 0, 1, 2, 3, 4, 5 } ++ [_]u8{0} ** 24;
+    var enc_buf: [encodedMaxLen(32)]u8 = undefined;
+    var dec_buf: [32]u8 = undefined;
+    const encoded = try encode32(&enc_buf, pk);
+    try testing.expect(encoded[0] == '1');
+    try testing.expect(encoded[1] == '1');
+    try testing.expect(encoded[2] == '1');
+    const decoded = try decode32(&dec_buf, encoded);
+    try testing.expectEqualSlices(u8, &pk, decoded);
+}
+
+test "decode32, invalid character" {
+    var out: [32]u8 = undefined;
+    // 'O' is not in the base58 alphabet
+    try testing.expectError(Base58Error.InvalidCharacter, decode32(&out, "1111111111111111111111111111111O"));
+}
+
+test "decode32, input too long" {
+    var out: [32]u8 = undefined;
+    try testing.expectError(Base58Error.Decode, decode32(&out, "1" ** 45));
+}
+
+test "decode32, leading ones mismatch" {
+    // null pubkey encodes to 32 '1's; adding a 33rd '1' must be rejected
+    var out: [32]u8 = undefined;
+    try testing.expectError(Base58Error.Decode, decode32(&out, "1" ** 33));
 }
