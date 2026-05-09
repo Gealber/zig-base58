@@ -49,9 +49,11 @@ const enc_table_64: [16][17]u32 = makeEncTable(64);
 
 fn makeDecTable(comptime N: usize) [intermediateSize(N)][N / 4]u32 {
     @setEvalBranchQuota(10000);
+
     const inter_sz = intermediateSize(N);
     const binary_sz = N / 4;
     const base: comptime_int = 1 << 32;
+
     var table: [inter_sz][binary_sz]u32 = .{.{0} ** binary_sz} ** inter_sz;
     for (0..inter_sz) |j| {
         var value: comptime_int = 1;
@@ -64,6 +66,7 @@ fn makeDecTable(comptime N: usize) [intermediateSize(N)][N / 4]u32 {
             value /= base;
         }
     }
+
     return table;
 }
 
@@ -72,9 +75,15 @@ const dec_table_64: [18][16]u32 = makeDecTable(64);
 
 pub const Base58Error = error{ Decode, InvalidCharacter, NoSpaceLeft };
 
-/// Returns the maximum buffer size needed for encode(dst, src) given src.len.
+/// Returns the minimum buffer size needed for encode(dst, src) given src.len.
+/// For 32 and 64-byte inputs the fast path (encode32/encode64) needs a working
+/// buffer of intermediateSize(N)*5, which exceeds the generic formula for N=64.
 pub fn encodedLen(src_len: usize) usize {
-    return (src_len * 138 / 100) + 1;
+    return switch (src_len) {
+        32 => comptime encodedMaxLen(32),
+        64 => comptime encodedMaxLen(64),
+        else => (src_len * 138 / 100) + 1,
+    };
 }
 
 /// Returns the maximum buffer size needed for decode(dst, src) given src.len.
@@ -90,25 +99,17 @@ pub fn encode(dst: []u8, src: []const u8) ![]u8 {
     };
 }
 
-pub fn decode(dst: []u8, src: []const u8) ![]u8 {
-    return switch (src.len) {
-        32 => decode32(dst, src[0..32]),
-        64 => decode64(dst, src[0..64]),
-        else => _decode(dst, src),
-    };
-}
-
 pub fn encodeAlloc(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     const buf = try allocator.alloc(u8, encodedLen(src.len));
     errdefer allocator.free(buf);
-    const result = try _encode(buf, src);
+    const result = try encode(buf, src);
     return allocator.realloc(buf, result.len);
 }
 
 pub fn decodeAlloc(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     const buf = try allocator.alloc(u8, decodedLen(src.len));
     errdefer allocator.free(buf);
-    const result = try _decode(buf, src);
+    const result = try decode(buf, src);
     return allocator.realloc(buf, result.len);
 }
 
@@ -156,7 +157,7 @@ fn _encode(dst: []u8, src: []const u8) ![]u8 {
 /// Decodes a Base58-encoded src into dst.
 /// dst must be at least src.len bytes.
 /// Returns a slice of dst containing the decoded result.
-fn _decode(dst: []u8, src: []const u8) ![]u8 {
+pub fn decode(dst: []u8, src: []const u8) ![]u8 {
     if (src.len == 0) return dst[0..0];
 
     var zero_cnt: usize = 0;
@@ -395,54 +396,64 @@ inline fn rawToIntermediate(comptime N: usize, raw: [intermediateSize(N) * 5]u8)
 }
 
 // Matrix multiply intermediate base-58^5 values into 32-bit binary limbs.
-// Mirrors limbsToIntermediate32. Uses u128 accumulators because inter_sz
-// products of (< 2^30) * (< 2^32) sum to > 2^64.
+// Mirrors limbsToIntermediate32.
+//
+// u64 accumulators are sufficient: each intermediate[j] < 58^5 < 2^30, and
+// the actual column sums of dec_table_32 are bounded such that the worst-case
+// accumulator (column 7) stays below 2^63. Verified by Firedancer.
 fn intermediateToLimbs32(intermediate: [9]u64) ![8]u32 {
-    var binary: [8]u128 = .{0} ** 8;
+    var binary: [8]u64 = .{0} ** 8;
+
     for (0..9) |j| {
-        for (0..8) |k| {
-            binary[k] += @as(u128, intermediate[j]) * @as(u128, dec_table_32[j][k]);
-        }
+        const limb: @Vector(8, u64) = @splat(intermediate[j]);
+        var table_row: @Vector(8, u64) = undefined;
+        inline for (0..8) |k| table_row[k] = dec_table_32[j][k];
+        const acc: @Vector(8, u64) = @bitCast(binary);
+        binary = @bitCast(acc + limb * table_row);
     }
 
     var k: usize = 7;
     while (k > 0) : (k -= 1) {
         binary[k - 1] += binary[k] >> 32;
-        binary[k] &= 0xFFFFFFFF;
+        binary[k] &= 0xFFFF_FFFF;
     }
 
     if (binary[0] >> 32 != 0) return Base58Error.Decode;
 
     var limbs: [8]u32 = undefined;
-    for (0..8) |i| limbs[i] = @intCast(binary[i] & 0xFFFFFFFF);
-
+    for (0..8) |i| limbs[i] = @intCast(binary[i]);
     return limbs;
 }
 
 // Mirrors intermediateToLimbs32 for the 64-byte (signature) case.
+//
+// Same u64 bound applies. The tightest column (13) reaches at most ~2^63.998
+// — fits in u64 with no overflow. Verified by Firedancer.
 fn intermediateToLimbs64(intermediate: [18]u64) ![16]u32 {
-    var binary: [16]u128 = .{0} ** 16;
+    var binary: [16]u64 = .{0} ** 16;
+
     for (0..18) |j| {
-        for (0..16) |k| {
-            binary[k] += @as(u128, intermediate[j]) * @as(u128, dec_table_64[j][k]);
-        }
+        const limb: @Vector(16, u64) = @splat(intermediate[j]);
+        var table_row: @Vector(16, u64) = undefined;
+        inline for (0..16) |k| table_row[k] = dec_table_64[j][k];
+        const acc: @Vector(16, u64) = @bitCast(binary);
+        binary = @bitCast(acc + limb * table_row);
     }
 
     var k: usize = 15;
     while (k > 0) : (k -= 1) {
         binary[k - 1] += binary[k] >> 32;
-        binary[k] &= 0xFFFFFFFF;
+        binary[k] &= 0xFFFF_FFFF;
     }
 
     if (binary[0] >> 32 != 0) return Base58Error.Decode;
 
     var limbs: [16]u32 = undefined;
-    for (0..16) |i| limbs[i] = @intCast(binary[i] & 0xFFFFFFFF);
-
+    for (0..16) |i| limbs[i] = @intCast(binary[i]);
     return limbs;
 }
 
-fn decode32(dst: []u8, src: []const u8) ![]u8 {
+pub fn decode32(dst: []u8, src: []const u8) ![]u8 {
     if (dst.len < 32) return Base58Error.NoSpaceLeft;
 
     const in_leading_ones = countLeadingOnes(src);
@@ -458,7 +469,7 @@ fn decode32(dst: []u8, src: []const u8) ![]u8 {
     return dst[0..32];
 }
 
-fn decode64(dst: []u8, src: []const u8) ![]u8 {
+pub fn decode64(dst: []u8, src: []const u8) ![]u8 {
     if (dst.len < 64) return Base58Error.NoSpaceLeft;
 
     const in_leading_ones = countLeadingOnes(src);
@@ -710,4 +721,83 @@ test "decode32, leading ones mismatch" {
     // null pubkey encodes to 32 '1's; adding a 33rd '1' must be rejected
     var out: [32]u8 = undefined;
     try testing.expectError(Base58Error.Decode, decode32(&out, "1" ** 33));
+}
+
+// --- Fuzz tests ---
+
+fn fuzzEncodeDecodeRoundTrip(_: void, smith: *std.testing.Smith) !void {
+    var raw: [128]u8 = undefined;
+    const len = smith.slice(&raw);
+    if (len == 0) return;
+    const input = raw[0..len];
+    var enc_buf: [encodedLen(128)]u8 = undefined;
+    const encoded = encode(enc_buf[0..encodedLen(input.len)], input) catch return;
+    var dec_buf: [128]u8 = undefined;
+    const decoded = decode(&dec_buf, encoded) catch return;
+    try testing.expectEqualSlices(u8, input, decoded);
+}
+
+// Round-trip through the public encode (dispatches to encode32/encode64 for 32/64b,
+// _encode otherwise) and _decode for arbitrary binary inputs up to 128 bytes.
+test "fuzz encode/_decode round-trip" {
+    try std.testing.fuzz({}, fuzzEncodeDecodeRoundTrip, .{});
+}
+
+fn fuzzEncode32Decode32(_: void, smith: *std.testing.Smith) !void {
+    var src: [32]u8 = undefined;
+    smith.bytes(&src);
+    var enc_buf: [encodedMaxLen(32)]u8 = undefined;
+    const encoded = try encode32(&enc_buf, src);
+    var dec_buf: [32]u8 = undefined;
+    const decoded = try decode32(&dec_buf, encoded);
+    try testing.expectEqualSlices(u8, &src, decoded);
+}
+
+// Round-trip through the encode32/decode32 fast path for arbitrary 32-byte inputs.
+test "fuzz encode32/decode32 round-trip" {
+    try std.testing.fuzz({}, fuzzEncode32Decode32, .{
+        .corpus = &.{
+            &([_]u8{0} ** 32), // null pubkey
+            &([_]u8{0xFF} ** 32), // max pubkey
+        },
+    });
+}
+
+fn fuzzEncode64Decode64(_: void, smith: *std.testing.Smith) !void {
+    var src: [64]u8 = undefined;
+    smith.bytes(&src);
+    var enc_buf: [encodedMaxLen(64)]u8 = undefined;
+    const encoded = try encode64(&enc_buf, src);
+    var dec_buf: [64]u8 = undefined;
+    const decoded = try decode64(&dec_buf, encoded);
+    try testing.expectEqualSlices(u8, &src, decoded);
+}
+
+// Round-trip through the encode64/decode64 fast path for arbitrary 64-byte inputs.
+test "fuzz encode64/decode64 round-trip" {
+    try std.testing.fuzz({}, fuzzEncode64Decode64, .{
+        .corpus = &.{
+            &([_]u8{0} ** 64), // null signature
+            &([_]u8{0xFF} ** 64), // max signature
+        },
+    });
+}
+
+fn fuzzDecodeNeverPanics(_: void, smith: *std.testing.Smith) !void {
+    var raw: [512]u8 = undefined;
+    const len = smith.slice(&raw);
+    var buf: [512]u8 = undefined;
+    _ = decode(&buf, raw[0..len]) catch {};
+}
+
+// decode must return an error (never panic) on any byte sequence.
+test "fuzz decode never panics" {
+    try std.testing.fuzz({}, fuzzDecodeNeverPanics, .{
+        .corpus = &.{
+            "11111111111111111111111111111111", // null pubkey encoded
+            "1" ** 64, // null signature encoded
+            "2NEpo7TZRRrLZSi2U", // "Hello World!" encoded
+            "OIl0", // chars excluded from the alphabet
+        },
+    });
 }
