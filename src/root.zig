@@ -5,7 +5,7 @@ const testing = std.testing;
 const Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const InverseAlphabet = init: {
     // 255 represents an invalid value
-    var table = [1]u8{255} ** 256;
+    var table: [256]u8 = @splat(255);
     for (Alphabet, 0..) |c, i| {
         table[c] = @intCast(i);
     }
@@ -29,7 +29,7 @@ fn makeEncTable(comptime N: usize) [N / 4][intermediateSize(N) - 1]u32 {
     const cols = intermediateSize(N) - 1;
     const base: comptime_int = 656356768;
 
-    var table: [binary_sz][cols]u32 = .{.{0} ** cols} ** binary_sz;
+    var table: [binary_sz][cols]u32 = @splat(@splat(0));
 
     for (0..binary_sz) |i| {
         var value: comptime_int = 1 << (32 * (binary_sz - 1 - i));
@@ -54,7 +54,7 @@ fn makeDecTable(comptime N: usize) [intermediateSize(N)][N / 4]u32 {
     const binary_sz = N / 4;
     const base: comptime_int = 1 << 32;
 
-    var table: [inter_sz][binary_sz]u32 = .{.{0} ** binary_sz} ** inter_sz;
+    var table: [inter_sz][binary_sz]u32 = @splat(@splat(0));
     for (0..inter_sz) |j| {
         var value: comptime_int = 1;
         var p: usize = 0;
@@ -211,7 +211,7 @@ fn signatureLimbs(src: [64]u8) [16]u32 {
 }
 
 fn limbsToIntermediate32(limbs: [8]u32) [9]u64 {
-    var intermediate: [9]u64 = .{0} ** 9;
+    var intermediate: [9]u64 = @splat(0);
 
     for (0..8) |i| {
         const limb: @Vector(8, u64) = @splat(@as(u64, limbs[i]));
@@ -231,7 +231,7 @@ fn limbsToIntermediate32(limbs: [8]u32) [9]u64 {
 }
 
 fn limbsToIntermediate64(limbs: [16]u32) [18]u64 {
-    var intermediate: [18]u64 = .{0} ** 18;
+    var intermediate: [18]u64 = @splat(0);
 
     for (0..8) |i| {
         const limb: @Vector(17, u64) = @splat(@as(u64, limbs[i]));
@@ -309,7 +309,7 @@ pub fn encodedMaxLen(comptime N: usize) usize {
 }
 
 fn countLeadingZeros(comptime N: usize, src: [N]u8) usize {
-    const MaskType = std.meta.Int(.unsigned, N);
+    const MaskType = @Int(.unsigned, N);
     const v: @Vector(N, u8) = src;
     const is_nonzero = v != @as(@Vector(N, u8), @splat(0));
     const mask: MaskType = @bitCast(is_nonzero);
@@ -354,7 +354,7 @@ inline fn base58ToRaw(comptime N: usize, in_leading_ones: usize, src: []const u8
 
     if (src.len > max_encoded) return Base58Error.Decode;
 
-    var raw: [raw_sz]u8 = .{0} ** raw_sz;
+    var raw: [raw_sz]u8 = @splat(0);
 
     const payload = src[in_leading_ones..];
     const offset = raw_sz - payload.len;
@@ -402,7 +402,7 @@ inline fn rawToIntermediate(comptime N: usize, raw: [intermediateSize(N) * 5]u8)
 // the actual column sums of dec_table_32 are bounded such that the worst-case
 // accumulator (column 7) stays below 2^63. Verified by Firedancer.
 fn intermediateToLimbs32(intermediate: [9]u64) ![8]u32 {
-    var binary: [8]u64 = .{0} ** 8;
+    var binary: [8]u64 = @splat(0);
 
     for (0..9) |j| {
         const limb: @Vector(8, u64) = @splat(intermediate[j]);
@@ -430,7 +430,7 @@ fn intermediateToLimbs32(intermediate: [9]u64) ![8]u32 {
 // Same u64 bound applies. The tightest column (13) reaches at most ~2^63.998
 // — fits in u64 with no overflow. Verified by Firedancer.
 fn intermediateToLimbs64(intermediate: [18]u64) ![16]u32 {
-    var binary: [16]u64 = .{0} ** 16;
+    var binary: [16]u64 = @splat(0);
 
     for (0..18) |j| {
         const limb: @Vector(16, u64) = @splat(intermediate[j]);
@@ -485,25 +485,25 @@ pub fn decode64(dst: []u8, src: []const u8) ![]u8 {
 }
 
 test "countLeadingZeros 32" {
-    try testing.expectEqual(@as(usize, 32), countLeadingZeros(32, [_]u8{0} ** 32));
-    try testing.expectEqual(@as(usize, 0), countLeadingZeros(32, [_]u8{1} ++ [_]u8{0} ** 31));
-    try testing.expectEqual(@as(usize, 3), countLeadingZeros(32, [_]u8{0} ** 3 ++ [_]u8{1} ++ [_]u8{0} ** 28));
+    try testing.expectEqual(@as(usize, 32), countLeadingZeros(32, @as([32]u8, @splat(0))));
+    try testing.expectEqual(@as(usize, 0), countLeadingZeros(32, [_]u8{1} ++ @as([31]u8, @splat(0))));
+    try testing.expectEqual(@as(usize, 3), countLeadingZeros(32, @as([3]u8, @splat(0)) ++ [_]u8{1} ++ @as([28]u8, @splat(0))));
 }
 
 test "countLeadingZeros 64" {
-    try testing.expectEqual(@as(usize, 64), countLeadingZeros(64, [_]u8{0} ** 64));
-    try testing.expectEqual(@as(usize, 0), countLeadingZeros(64, [_]u8{1} ++ [_]u8{0} ** 63));
-    try testing.expectEqual(@as(usize, 5), countLeadingZeros(64, [_]u8{0} ** 5 ++ [_]u8{1} ++ [_]u8{0} ** 58));
+    try testing.expectEqual(@as(usize, 64), countLeadingZeros(64, @as([64]u8, @splat(0))));
+    try testing.expectEqual(@as(usize, 0), countLeadingZeros(64, [_]u8{1} ++ @as([63]u8, @splat(0))));
+    try testing.expectEqual(@as(usize, 5), countLeadingZeros(64, @as([5]u8, @splat(0)) ++ [_]u8{1} ++ @as([58]u8, @splat(0))));
 }
 
 test "pubkey, signature to limbs" {
-    const pubkey: [32]u8 = [1]u8{10} ** 32;
+    const pubkey: [32]u8 = @splat(10);
     const pk_limbs = pubkeyLimbs(pubkey);
-    const pk_limbs_expected = [1]u32{168430090} ** 8;
+    const pk_limbs_expected: [8]u32 = @splat(168430090);
 
-    const signature: [64]u8 = [1]u8{10} ** 64;
+    const signature: [64]u8 = @splat(10);
     const sig_limbs = signatureLimbs(signature);
-    const sig_limbs_expected = [1]u32{168430090} ** 16;
+    const sig_limbs_expected: [16]u32 = @splat(168430090);
 
     try std.testing.expectEqualSlices(u32, &pk_limbs_expected, &pk_limbs);
     try std.testing.expectEqualSlices(u32, &sig_limbs_expected, &sig_limbs);
@@ -513,7 +513,7 @@ test "pubkey, signature to limbs" {
 }
 
 test "pubkey, _encode32" {
-    const pk = [_]u8{0} ** 32;
+    const pk: [32]u8 = @splat(0);
     var out: [encodedMaxLen(32)]u8 = undefined;
     const result = try encode32(&out, pk);
     const expected = "11111111111111111111111111111111";
@@ -521,15 +521,15 @@ test "pubkey, _encode32" {
 }
 
 test "null signature, _encode64" {
-    const sig = [_]u8{0} ** 64;
+    const sig: [64]u8 = @splat(0);
     var out: [encodedMaxLen(64)]u8 = undefined;
     const result = try encode64(&out, sig);
-    const expected = "1" ** 64;
+    const expected = &@as([64]u8, @splat('1'));
     try testing.expectEqualStrings(expected, result);
 }
 
 test "null pubkey, encode/decode" {
-    const pk = [_]u8{0} ** 32;
+    const pk: [32]u8 = @splat(0);
     var enc_buf: [64]u8 = undefined;
     var dec_buf: [64]u8 = undefined;
 
@@ -581,33 +581,33 @@ test "magic case, encode" {
 }
 
 test "intermediateToRaw 32, all zeros" {
-    const raw = intermediateToRaw(32, .{0} ** 9);
-    try testing.expectEqualSlices(u8, &(.{0} ** 45), &raw);
+    const raw = intermediateToRaw(32, @splat(0));
+    try testing.expectEqualSlices(u8, &@as([45]u8, @splat(0)), &raw);
 }
 
 test "intermediateToRaw 32, last = 1" {
-    var intermediate: [9]u64 = .{0} ** 9;
+    var intermediate: [9]u64 = @splat(0);
     intermediate[8] = 1;
     const raw = intermediateToRaw(32, intermediate);
-    var expected: [45]u8 = .{0} ** 45;
+    var expected: [45]u8 = @splat(0);
     expected[44] = 1; // 5*8+4
     try testing.expectEqualSlices(u8, &expected, &raw);
 }
 
 test "intermediateToRaw 32, last = 58" {
-    var intermediate: [9]u64 = .{0} ** 9;
+    var intermediate: [9]u64 = @splat(0);
     intermediate[8] = 58;
     const raw = intermediateToRaw(32, intermediate);
-    var expected: [45]u8 = .{0} ** 45;
+    var expected: [45]u8 = @splat(0);
     expected[43] = 1; // 5*8+3, digit = 58/58 % 58 = 1
     try testing.expectEqualSlices(u8, &expected, &raw);
 }
 
 test "intermediateToRaw 32, first = 58^5 - 1" {
-    var intermediate: [9]u64 = .{0} ** 9;
+    var intermediate: [9]u64 = @splat(0);
     intermediate[0] = 656356767;
     const raw = intermediateToRaw(32, intermediate);
-    var expected: [45]u8 = .{0} ** 45;
+    var expected: [45]u8 = @splat(0);
     expected[0] = 57;
     expected[1] = 57;
     expected[2] = 57;
@@ -617,36 +617,36 @@ test "intermediateToRaw 32, first = 58^5 - 1" {
 }
 
 test "intermediateToRaw 64, all zeros" {
-    const raw = intermediateToRaw(64, .{0} ** 18);
-    try testing.expectEqualSlices(u8, &(.{0} ** 90), &raw);
+    const raw = intermediateToRaw(64, @splat(0));
+    try testing.expectEqualSlices(u8, &@as([90]u8, @splat(0)), &raw);
 }
 
 test "rawToIntermediate 32, all zeros" {
-    const intermediate = rawToIntermediate(32, .{0} ** 45);
-    try testing.expectEqualSlices(u64, &(.{0} ** 9), &intermediate);
+    const intermediate = rawToIntermediate(32, @splat(0));
+    try testing.expectEqualSlices(u64, &@as([9]u64, @splat(0)), &intermediate);
 }
 
 test "rawToIntermediate 32, last group = [0,0,0,0,1]" {
-    var raw: [45]u8 = .{0} ** 45;
+    var raw: [45]u8 = @splat(0);
     raw[44] = 1;
     const intermediate = rawToIntermediate(32, raw);
-    var expected: [9]u64 = .{0} ** 9;
+    var expected: [9]u64 = @splat(0);
     expected[8] = 1;
     try testing.expectEqualSlices(u64, &expected, &intermediate);
 }
 
 test "rawToIntermediate 32, last group = [1,0,0,0,0]" {
-    var raw: [45]u8 = .{0} ** 45;
+    var raw: [45]u8 = @splat(0);
     raw[40] = 1; // first digit of last group → 1 * 58^4 = 11316496
     const intermediate = rawToIntermediate(32, raw);
-    var expected: [9]u64 = .{0} ** 9;
+    var expected: [9]u64 = @splat(0);
     expected[8] = 11316496;
     try testing.expectEqualSlices(u64, &expected, &intermediate);
 }
 
 test "rawToIntermediate/intermediateToRaw round-trip 32" {
     // encode a known intermediate, convert to raw, convert back
-    var original: [9]u64 = .{0} ** 9;
+    var original: [9]u64 = @splat(0);
     original[3] = 123456;
     original[7] = 58 * 3 + 17; // 191
     const raw = intermediateToRaw(32, original);
@@ -657,13 +657,13 @@ test "rawToIntermediate/intermediateToRaw round-trip 32" {
 test "decode32, null pubkey" {
     var out: [32]u8 = undefined;
     const result = try decode32(&out, "11111111111111111111111111111111");
-    try testing.expectEqualSlices(u8, &(.{0} ** 32), result);
+    try testing.expectEqualSlices(u8, &@as([32]u8, @splat(0)), result);
 }
 
 test "decode64, null signature" {
     var out: [64]u8 = undefined;
-    const result = try decode64(&out, "1" ** 64);
-    try testing.expectEqualSlices(u8, &(.{0} ** 64), result);
+    const result = try decode64(&out, &@as([64]u8, @splat('1')));
+    try testing.expectEqualSlices(u8, &@as([64]u8, @splat(0)), result);
 }
 
 test "decode32 round-trip" {
@@ -695,7 +695,7 @@ test "decode64 round-trip" {
 }
 
 test "decode32 round-trip, leading zero bytes" {
-    const pk = [8]u8{ 0, 0, 0, 1, 2, 3, 4, 5 } ++ [_]u8{0} ** 24;
+    const pk = [8]u8{ 0, 0, 0, 1, 2, 3, 4, 5 } ++ @as([24]u8, @splat(0));
     var enc_buf: [encodedMaxLen(32)]u8 = undefined;
     var dec_buf: [32]u8 = undefined;
     const encoded = try encode32(&enc_buf, pk);
@@ -714,13 +714,13 @@ test "decode32, invalid character" {
 
 test "decode32, input too long" {
     var out: [32]u8 = undefined;
-    try testing.expectError(Base58Error.Decode, decode32(&out, "1" ** 45));
+    try testing.expectError(Base58Error.Decode, decode32(&out, &@as([45]u8, @splat('1'))));
 }
 
 test "decode32, leading ones mismatch" {
     // null pubkey encodes to 32 '1's; adding a 33rd '1' must be rejected
     var out: [32]u8 = undefined;
-    try testing.expectError(Base58Error.Decode, decode32(&out, "1" ** 33));
+    try testing.expectError(Base58Error.Decode, decode32(&out, &@as([33]u8, @splat('1'))));
 }
 
 // --- Fuzz tests ---
@@ -757,8 +757,8 @@ fn fuzzEncode32Decode32(_: void, smith: *std.testing.Smith) !void {
 test "fuzz encode32/decode32 round-trip" {
     try std.testing.fuzz({}, fuzzEncode32Decode32, .{
         .corpus = &.{
-            &([_]u8{0} ** 32), // null pubkey
-            &([_]u8{0xFF} ** 32), // max pubkey
+            &@as([32]u8, @splat(0)), // null pubkey
+            &@as([32]u8, @splat(0xFF)), // max pubkey
         },
     });
 }
@@ -777,8 +777,8 @@ fn fuzzEncode64Decode64(_: void, smith: *std.testing.Smith) !void {
 test "fuzz encode64/decode64 round-trip" {
     try std.testing.fuzz({}, fuzzEncode64Decode64, .{
         .corpus = &.{
-            &([_]u8{0} ** 64), // null signature
-            &([_]u8{0xFF} ** 64), // max signature
+            &@as([64]u8, @splat(0)), // null signature
+            &@as([64]u8, @splat(0xFF)), // max signature
         },
     });
 }
@@ -795,7 +795,7 @@ test "fuzz decode never panics" {
     try std.testing.fuzz({}, fuzzDecodeNeverPanics, .{
         .corpus = &.{
             "11111111111111111111111111111111", // null pubkey encoded
-            "1" ** 64, // null signature encoded
+            &@as([64]u8, @splat('1')), // null signature encoded
             "2NEpo7TZRRrLZSi2U", // "Hello World!" encoded
             "OIl0", // chars excluded from the alphabet
         },

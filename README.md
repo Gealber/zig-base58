@@ -6,7 +6,7 @@ This lib tries to follow the base58 implementation of [fireadancer](https://gith
 
 ## Requirements
 
-Zig `0.16.0` or newer.
+Zig `0.17.0` or newer.
 
 ## Installation
 
